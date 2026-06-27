@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  proxy_stub:
+    build: .
+    container_name: proxy_stub
+
+    restart: unless-stopped
+
+    ports:
+      - "48980:48980"
+
+    env_file:
+      - .env
+
+    environment:
+      LISTEN_IP: "0.0.0.0"
+      LISTEN_PORT: "48980"
+      isDocker: "true"
+      logLevel: "30" # 10=Debug 20=Info 30=Warning 40=Error 50=Critical
+
+# To run:
+# docker compose build
+# docker compose up --force-recreate
