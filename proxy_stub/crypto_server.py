@@ -1,4 +1,4 @@
-import os
+import os, hashlib
 import time
 import random
 import asyncio
@@ -11,6 +11,16 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 logger = logging.getLogger(__name__)
 
+_HELLO_PAD_MIN = 32
+_HELLO_PAD_MAX = 200
+HELLO_SIZE = 256
+
+# SERVER-SIDE CODE
+
+def _hello_pad_len(seed: bytes) -> int:
+    h = hashlib.sha256(seed + b'\xff\xfe\xfd').digest()
+    span = _HELLO_PAD_MAX - _HELLO_PAD_MIN + 1
+    return _HELLO_PAD_MIN + int.from_bytes(h[:2], 'big') % span
 
 class SessionRegistry:
     """Registry for temporary storage and resumption of sessions"""
@@ -61,40 +71,32 @@ class SecureSession:
     def key(self) -> bytes | None:
         return self._key
 
-    async def negotiate_session(
-            self,
-            reader: asyncio.StreamReader,
-            writer: asyncio.StreamWriter,
-            registry: SessionRegistry
-    ) -> bool:
-        """
-        Performs either a full ECDH handshake or verifies session resumption.
-        Returns True if the key is successfully set, otherwise False
-        """
+    def _hello_pad_len(self, seed: bytes) -> int:
+        h = hashlib.sha256(seed + b'\xff\xfe\xfd').digest()
+        span = _HELLO_PAD_MAX - _HELLO_PAD_MIN + 1
+        return _HELLO_PAD_MIN + int.from_bytes(h[:2], 'big') % span
+
+    async def negotiate_session(self, reader, writer, registry):
         try:
-            mode = await reader.readexactly(1)
+            hello = await reader.readexactly(HELLO_SIZE)
         except Exception as e:
-            logger.warning(f"Couldn't read session mode: {e}")
+            logger.warning(f"Failed to read hello packet: {e}")
             return False
 
-        if mode == self.MODE_NEW_SESSION:
-            return await self._handle_new_session(reader, writer, registry)
-        elif mode == self.MODE_RESUME:
-            return await self._handle_resume_session(reader, writer, registry)
+        session_id_candidate = hello[:16]
+        key = await registry.get_and_validate(session_id_candidate)
+
+        if key:
+            nonce = hello[16:28]
+            ct_proof = hello[28:60]
+            return await self._handle_resume_session(session_id_candidate, key, nonce, ct_proof, writer)
         else:
-            logger.warning(f"Unknown connection mode has been received: {mode.hex()}")
-            return False
+            client_pub_bytes = hello[:32]
+            return await self._handle_new_session(client_pub_bytes, writer, registry)
 
-    async def _handle_new_session(
-            self,
-            reader: asyncio.StreamReader,
-            writer: asyncio.StreamWriter,
-            registry: SessionRegistry
-    ) -> bool:
+    async def _handle_new_session(self, client_pub_bytes, writer, registry):
         try:
-            client_pub_bytes = await reader.readexactly(32)
             client_pub = X25519PublicKey.from_public_bytes(client_pub_bytes)
-
             priv = X25519PrivateKey.generate()
             pub_bytes = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
             writer.write(pub_bytes)
@@ -105,51 +107,28 @@ class SecureSession:
 
             session_id = os.urandom(16)
             await registry.register(session_id, self._key)
-
-            # Sending the encrypted session_id to the client
             writer.write(self.encrypt_frame(session_id))
             await writer.drain()
-            logger.info(f"A new session has been started: {session_id.hex()[:8]}...")
+            logger.info(f"New session: {session_id.hex()[:8]}...")
             return True
         except Exception as e:
-            logger.error(f"Ошибка при установлении новой сессии (ECDH): {e}")
+            logger.error(f"New session error: {e}")
             return False
 
-    async def _handle_resume_session(
-            self,
-            reader: asyncio.StreamReader,
-            writer: asyncio.StreamWriter,
-            registry: SessionRegistry
-    ) -> bool:
+    async def _handle_resume_session(self, session_id, key, nonce, ct_proof, writer):
         try:
-            session_id = await reader.readexactly(16)
-            nonce = await reader.readexactly(12)
-            proof = await reader.readexactly(32)  # encrypt(key, nonce, sid) = 16 data + 16 tag
-        except Exception as e:
-            logger.warning(f"Error reading the resume parameters: {e}")
-            return False
-
-        key = await registry.get_and_validate(session_id)
-        if not key:
-            logger.warning(f"Resumption rejected: session {session_id.hex()[:8]}... not found or expired")
-            writer.write(b'\x01')
-            await writer.drain()
-            return False
-
-        try:
-            decrypted = ChaCha20Poly1305(key).decrypt(nonce, proof, None)
+            decrypted = ChaCha20Poly1305(key).decrypt(nonce, ct_proof, None)
             if decrypted != session_id:
-                raise ValueError("Invalid confirmation token (proof)")
+                raise ValueError("Proof mismatch")
         except Exception as e:
-            logger.warning(f"Couldn't resume session {session_id.hex()[:8]}... : {e}")
-            writer.write(b'\x01')
-            await writer.drain()
+            logger.warning(f"Resume rejected ({session_id.hex()[:8]}...): {e}")
+            writer.close()
             return False
 
         self._key = key
-        writer.write(b'\x00')
+        writer.write(os.urandom(32) + self.encrypt_frame(b'\x00'))
         await writer.drain()
-        logger.info(f"Session resumed successfully: {session_id.hex()[:8]}...")
+        logger.info(f"Session resumed: {session_id.hex()[:8]}...")
         return True
 
     def _derive_key(self, shared_secret: bytes) -> bytes:

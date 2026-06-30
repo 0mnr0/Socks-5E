@@ -3,19 +3,20 @@ import asyncio
 import logging
 from typing import Optional
 
-from crypto import SessionRegistry, SecureSession
+from crypto_server import SessionRegistry, SecureSession
 from socks import Socks5ServerNegotiator
 
 LogLevel = int(os.getenv('logLevel',   '30'))
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=LogLevel, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
 LISTEN_IP   = os.getenv('LISTEN_IP',   '0.0.0.0')
 LISTEN_PORT = int(os.getenv('LISTEN_PORT', 48980))
-PROXY_USER  = os.getenv('PROXY_USER',  '')
-PROXY_PASS  = os.getenv('PROXY_PASS',  '')
+PROXY_USER  = "abc"
+PROXY_PASS  = "CDE"
 SESSION_TTL = (1 * 3600)/6
 
+# THATS A SERVER SIDE
 
 if len(PROXY_USER) == 0 or len(PROXY_PASS) == 0:
     PROXY_USER, PROXY_PASS = None, None

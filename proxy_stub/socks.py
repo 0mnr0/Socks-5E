@@ -2,10 +2,11 @@ import socket
 import asyncio
 import logging
 from typing import Optional, Tuple
-from crypto import SecureSession
+from crypto_server import SecureSession
 
 logger = logging.getLogger(__name__)
 
+# THATS A SERVER SIDE
 
 class Socks5ServerNegotiator:
     """Processing an encrypted SOCKS5 dialog with an incoming client"""
